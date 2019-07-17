@@ -33,8 +33,8 @@ func Dial(network, address string) (net.Conn, error) {
 
 var testServerMap sync.Map
 
-func defaultHandler(s *Session) {
-	conn := s.conn
+func defaultHandler(s Session) {
+	conn := s.Conn()
 	for {
 		bs := make([]byte, 1)
 		n, err := io.ReadFull(conn, bs)
@@ -62,9 +62,10 @@ type Server struct {
 
 type ServerConfig struct {
 	Network       string
-	PanicHandler  func(session *Session, err interface{})
-	Handler       func(session *Session)
-	RemoveHandler func(session *Session)
+	PanicHandler  func(session Session, err interface{})
+	Handler       func(session Session)
+	RemoveHandler func(session Session)
+	App           interface{}
 }
 
 func New(configs ...ServerConfig) *Server {
@@ -143,7 +144,7 @@ func (s *Server) Go(f func()) {
 func (s *Server) handleNewConnection(conn net.Conn) {
 	session := s.newSession(conn)
 	defer func() {
-		log.Println("handle connection", session.id, "over")
+		log.Println("handle connection", session.ID(), "over")
 		err := recover()
 		_ = conn.Close()
 		if err != nil {
@@ -156,11 +157,11 @@ func (s *Server) handleNewConnection(conn net.Conn) {
 		<-ctx.Done()
 		_ = conn.Close()
 	})
-	log.Println("handle new connection", session.id)
+	log.Println("handle new connection", session.ID())
 	s.cfg.Handler(session)
 }
 
-func (s *Server) handlePanic(session *Session, err interface{}) {
+func (s *Server) handlePanic(session Session, err interface{}) {
 	defer func() {
 		if err := recover(); err != nil {
 			log.Println(err)
@@ -169,11 +170,12 @@ func (s *Server) handlePanic(session *Session, err interface{}) {
 	s.cfg.PanicHandler(session, err)
 }
 
-func (s *Server) newSession(conn net.Conn) *Session {
+func (s *Server) newSession(conn net.Conn) Session {
 	count := atomic.AddUint64(&s.connCounter, 1)
-	return &Session{
+	return &session{
 		id:   count,
 		conn: conn,
+		app:  s.cfg.App,
 	}
 }
 
@@ -216,11 +218,11 @@ func ErrorNeedClose(err error) bool {
 func mergeConfig(configs ...ServerConfig) ServerConfig {
 	var defaultCfg = ServerConfig{
 		Network: "tcp",
-		PanicHandler: func(s *Session, err interface{}) {
+		PanicHandler: func(s Session, err interface{}) {
 			log.Println(err)
 		},
 		Handler: defaultHandler,
-		RemoveHandler: func(s *Session) {
+		RemoveHandler: func(s Session) {
 		},
 	}
 	for _, cfg := range configs {
@@ -230,8 +232,14 @@ func mergeConfig(configs ...ServerConfig) ServerConfig {
 		if cfg.Handler != nil {
 			defaultCfg.Handler = cfg.Handler
 		}
+		if cfg.RemoveHandler != nil {
+			defaultCfg.RemoveHandler = cfg.RemoveHandler
+		}
 		if cfg.Network != "" {
 			defaultCfg.Network = cfg.Network
+		}
+		if cfg.App != nil {
+			defaultCfg.App = cfg.App
 		}
 	}
 	return defaultCfg
