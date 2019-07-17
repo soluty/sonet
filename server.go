@@ -33,7 +33,8 @@ func Dial(network, address string) (net.Conn, error) {
 
 var testServerMap sync.Map
 
-func defaultHandler(conn net.Conn) {
+func defaultHandler(s *Session) {
+	conn := s.conn
 	for {
 		bs := make([]byte, 1)
 		n, err := io.ReadFull(conn, bs)
@@ -60,9 +61,10 @@ type Server struct {
 }
 
 type ServerConfig struct {
-	Network      string
-	PanicHandler func(err interface{})
-	Handler      func(conn net.Conn)
+	Network       string
+	PanicHandler  func(session *Session, err interface{})
+	Handler       func(session *Session)
+	RemoveHandler func(session *Session)
 }
 
 func New(configs ...ServerConfig) *Server {
@@ -139,31 +141,40 @@ func (s *Server) Go(f func()) {
 }
 
 func (s *Server) handleNewConnection(conn net.Conn) {
-	count := atomic.AddUint64(&s.connCounter, 1)
+	session := s.newSession(conn)
 	defer func() {
-		log.Println("handle connection", count, "over")
+		log.Println("handle connection", session.id, "over")
 		err := recover()
 		_ = conn.Close()
 		if err != nil {
-			s.handlePanic(err)
+			s.handlePanic(session, err)
 		}
+		s.cfg.RemoveHandler(session)
 	}()
 	ctx, _ := context.WithCancel(s.ctx)
 	s.Go(func() {
 		<-ctx.Done()
 		_ = conn.Close()
 	})
-	log.Println("handle new connection", count)
-	s.cfg.Handler(conn)
+	log.Println("handle new connection", session.id)
+	s.cfg.Handler(session)
 }
 
-func (s *Server) handlePanic(err interface{}) {
+func (s *Server) handlePanic(session *Session, err interface{}) {
 	defer func() {
 		if err := recover(); err != nil {
 			log.Println(err)
 		}
 	}()
-	s.cfg.PanicHandler(err)
+	s.cfg.PanicHandler(session, err)
+}
+
+func (s *Server) newSession(conn net.Conn) *Session {
+	count := atomic.AddUint64(&s.connCounter, 1)
+	return &Session{
+		id:   count,
+		conn: conn,
+	}
 }
 
 func (s *Server) accept() (net.Conn, error) {
@@ -205,10 +216,12 @@ func ErrorNeedClose(err error) bool {
 func mergeConfig(configs ...ServerConfig) ServerConfig {
 	var defaultCfg = ServerConfig{
 		Network: "tcp",
-		PanicHandler: func(err interface{}) {
+		PanicHandler: func(s *Session, err interface{}) {
 			log.Println(err)
 		},
 		Handler: defaultHandler,
+		RemoveHandler: func(s *Session) {
+		},
 	}
 	for _, cfg := range configs {
 		if cfg.PanicHandler != nil {

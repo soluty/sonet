@@ -19,3 +19,16 @@ func TestDial(t *testing.T) {
 	s.Stop()
 	s.Wait()
 }
+
+func TestDialTcp(t *testing.T) {
+	s := sonet.New()
+	go s.Start(":8003")
+	time.Sleep(100 * time.Millisecond)
+	c, _ := sonet.Dial("tcp", "127.0.0.1:8003")
+	c.Write([]byte("a"))
+	b := make([]byte, 1)
+	c.Read(b)
+	fmt.Println(string(b))
+	s.Stop()
+	s.Wait()
+}
