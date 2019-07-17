@@ -15,6 +15,22 @@ import (
 	"time"
 )
 
+func Dial(network, address string) (net.Conn, error) {
+	if network == "test" {
+		c, s := net.Pipe()
+		if server, ok := testServerMap.Load(address); ok {
+			ss := server.(*Server)
+			ss.Go(func() {
+				ss.handleNewConnection(s)
+			})
+		} else {
+			return nil, errors.New("cant connect address " + address)
+		}
+		return c, nil
+	}
+	return net.Dial(network, address)
+}
+
 var testServerMap sync.Map
 
 func defaultHandler(conn net.Conn) {
@@ -35,9 +51,9 @@ type Server struct {
 	l           net.Listener
 	stopOnce    sync.Once
 	stopFunc    context.CancelFunc
+	stopped     bool
 	ctx         context.Context // root context
 	sigChan     chan os.Signal
-	stopped     bool
 	wg          sync.WaitGroup
 	cfg         ServerConfig
 	connCounter uint64
@@ -49,27 +65,26 @@ type ServerConfig struct {
 	Handler      func(conn net.Conn)
 }
 
-func New(cfgs ...ServerConfig) *Server {
-	var cfg = mergeConfig(cfgs...)
+func New(configs ...ServerConfig) *Server {
+	var cfg = mergeConfig(configs...)
 	s := &Server{
 		cfg: cfg,
 	}
-
 	s.ctx, s.stopFunc = context.WithCancel(context.Background())
 	s.sigChan = make(chan os.Signal, 1)
 	signal.Notify(s.sigChan, os.Interrupt, os.Kill, syscall.SIGTERM, syscall.SIGQUIT)
 	return s
 }
 
-func (s *Server) Start(address string) error {
+func (s *Server) Start(address string) {
 	if s.cfg.Network == "test" {
 		if _, loaded := testServerMap.LoadOrStore(address, s); loaded {
-			return errors.New("server has started")
+			panic("server has started")
 		}
 		for {
 			select {
 			case <-s.ctx.Done():
-				return nil
+				return
 			default:
 				time.Sleep(time.Millisecond * 100)
 			}
@@ -77,18 +92,19 @@ func (s *Server) Start(address string) error {
 	}
 	l, err := net.Listen(s.cfg.Network, address)
 	if err != nil {
-		return err
+		panic(err.Error())
+		return
 	}
 	s.l = l
 	for {
 		select {
 		case <-s.ctx.Done():
-			return nil
+			return
 		default:
 		}
-		c, err := accept(s.l)
+		c, err := s.accept()
 		if err != nil {
-			return err
+			return
 		}
 		s.Go(func() {
 			s.handleNewConnection(c)
@@ -112,8 +128,13 @@ func (s *Server) Stop() {
 func (s *Server) Go(f func()) {
 	s.wg.Add(1)
 	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Println(err)
+			}
+			s.wg.Done()
+		}()
 		f()
-		s.wg.Done()
 	}()
 }
 
@@ -132,7 +153,7 @@ func (s *Server) handleNewConnection(conn net.Conn) {
 		<-ctx.Done()
 		_ = conn.Close()
 	})
-	log.Println("default handler: add new connection", count)
+	log.Println("handle new connection", count)
 	s.cfg.Handler(conn)
 }
 
@@ -145,10 +166,13 @@ func (s *Server) handlePanic(err interface{}) {
 	s.cfg.PanicHandler(err)
 }
 
-func accept(listener net.Listener) (net.Conn, error) {
+func (s *Server) accept() (net.Conn, error) {
 	var tempDelay time.Duration
 	for {
-		conn, err := listener.Accept()
+		if s.stopped {
+			return nil, errors.New("server stopped")
+		}
+		conn, err := s.l.Accept()
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				if tempDelay == 0 {
@@ -178,7 +202,7 @@ func ErrorNeedClose(err error) bool {
 	return false
 }
 
-func mergeConfig(cfgs ...ServerConfig) ServerConfig {
+func mergeConfig(configs ...ServerConfig) ServerConfig {
 	var defaultCfg = ServerConfig{
 		Network: "tcp",
 		PanicHandler: func(err interface{}) {
@@ -186,7 +210,7 @@ func mergeConfig(cfgs ...ServerConfig) ServerConfig {
 		},
 		Handler: defaultHandler,
 	}
-	for _, cfg := range cfgs {
+	for _, cfg := range configs {
 		if cfg.PanicHandler != nil {
 			defaultCfg.PanicHandler = cfg.PanicHandler
 		}
