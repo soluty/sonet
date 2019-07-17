@@ -1,3 +1,3 @@
-module github.com/sonet
+module github.com/soluty/sonet
 
 go 1.12
