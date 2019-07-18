@@ -20,7 +20,7 @@ func Dial(network, address string) (net.Conn, error) {
 		c, s := net.Pipe()
 		if server, ok := testServerMap.Load(address); ok {
 			ss := server.(*Server)
-			ss.Go(func() {
+			ss.Go(func(ctx context.Context) {
 				ss.handleNewConnection(s)
 			})
 		} else {
@@ -29,6 +29,15 @@ func Dial(network, address string) (net.Conn, error) {
 		return c, nil
 	}
 	return net.Dial(network, address)
+}
+
+// MustDial简化做单元测试的时候写
+func MustDial(address string) net.Conn {
+	conn, err := Dial("test", address)
+	if err != nil {
+		panic(err)
+	}
+	return conn
 }
 
 var testServerMap sync.Map
@@ -109,7 +118,7 @@ func (s *Server) Start(address string) {
 		if err != nil {
 			return
 		}
-		s.Go(func() {
+		s.Go(func(context.Context) {
 			s.handleNewConnection(c)
 		})
 	}
@@ -128,7 +137,7 @@ func (s *Server) Stop() {
 	})
 }
 
-func (s *Server) Go(f func()) {
+func (s *Server) Go(f func(ctx context.Context)) {
 	s.wg.Add(1)
 	go func() {
 		defer func() {
@@ -137,7 +146,7 @@ func (s *Server) Go(f func()) {
 			}
 			s.wg.Done()
 		}()
-		f()
+		f(s.ctx)
 	}()
 }
 
@@ -153,7 +162,7 @@ func (s *Server) handleNewConnection(conn net.Conn) {
 		s.cfg.RemoveHandler(session)
 	}()
 	ctx, _ := context.WithCancel(s.ctx)
-	s.Go(func() {
+	s.Go(func(context.Context) {
 		<-ctx.Done()
 		_ = conn.Close()
 	})
