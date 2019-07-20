@@ -15,31 +15,6 @@ import (
 	"time"
 )
 
-func Dial(network, address string) (net.Conn, error) {
-	if network == "test" {
-		c, s := net.Pipe()
-		if server, ok := testServerMap.Load(address); ok {
-			ss := server.(*Server)
-			ss.Go(func(ctx context.Context) {
-				ss.handleNewConnection(s)
-			})
-		} else {
-			return nil, errors.New("cant connect address " + address)
-		}
-		return c, nil
-	}
-	return net.Dial(network, address)
-}
-
-// MustDial简化做单元测试的时候写
-func MustDial(address string) net.Conn {
-	conn, err := Dial("test", address)
-	if err != nil {
-		panic(err)
-	}
-	return conn
-}
-
 var testServerMap sync.Map
 
 func defaultHandler(s Session) {
@@ -88,6 +63,10 @@ func New(configs ...ServerConfig) *Server {
 	return s
 }
 
+func (s *Server) SetListener(l net.Listener) {
+	s.l = l
+}
+
 func (s *Server) Start(address string) {
 	if s.cfg.Network == "test" {
 		if _, loaded := testServerMap.LoadOrStore(address, s); loaded {
@@ -102,12 +81,14 @@ func (s *Server) Start(address string) {
 			}
 		}
 	}
-	l, err := net.Listen(s.cfg.Network, address)
-	if err != nil {
-		panic(err.Error())
-		return
+	if s.l == nil {
+		l, err := net.Listen(s.cfg.Network, address)
+		if err != nil {
+			panic(err.Error())
+			return
+		}
+		s.l = l
 	}
-	s.l = l
 	for {
 		select {
 		case <-s.ctx.Done():
